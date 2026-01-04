@@ -13,11 +13,11 @@ def main() -> None:
     controller = AQIController()
 
     st.sidebar.header("抓取配置")
-    limit = st.sidebar.slider("城市数量", min_value=10, max_value=30, value=12, step=2)
+    limit = st.sidebar.slider("城市数量", min_value=10, max_value=30, value=20, step=2)
     top_n = st.sidebar.slider("排行数量", min_value=3, max_value=5, value=3)
 
     with st.spinner("正在抓取数据并解析..."):
-        df, raw_preview = controller.load_data(limit=limit)
+        df, monthly_df, raw_preview = controller.load_data(limit=limit)
         best, worst = controller.summarize(df, top_n=top_n)
         ordered = controller.to_bar_chart_data(df)
 
@@ -25,6 +25,9 @@ def main() -> None:
     aqi_view.render_table(df)
     aqi_view.render_insights(best, worst)
     aqi_view.render_chart(ordered)
+    aqi_view.render_city_trend(monthly_df)
+    aqi_view.render_monthly_top20(monthly_df)
+    aqi_view.render_city_comparison(monthly_df)
 
 
 if __name__ == "__main__":

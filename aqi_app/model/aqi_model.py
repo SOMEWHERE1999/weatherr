@@ -1,7 +1,9 @@
+import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
-import logging
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
@@ -17,8 +19,9 @@ class CityAQI:
 class AQIModel:
     BASE_URL = "https://www.aqistudy.cn/historydata/index.php"
     ROBOTS_URL = "https://www.aqistudy.cn/robots.txt"
+    MONTH_URL = "https://www.aqistudy.cn/historydata/monthdata.php?city={city}"
 
-    def __init__(self, session: requests.Session | None = None) -> None:
+    def __init__(self, session: requests.Session | None = None, data_dir: str | Path = "data/monthly") -> None:
         self.session = session or requests.Session()
         self.session.headers.update(
             {
@@ -29,6 +32,8 @@ class AQIModel:
                 )
             }
         )
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         logging.debug("AQIModel initialized with custom session headers")
 
     def _fetch_text(self, url: str) -> str:
@@ -74,6 +79,61 @@ class AQIModel:
             cities = self._sample_data(limit)
         return cities, robots_text or html_text[:500]
 
+    def fetch_city_monthly(self, city: str) -> pd.DataFrame:
+        """Fetch monthly AQI for a single city and persist to CSV.
+
+        The target site lists each city's月度数据 in a table; we parse the month
+        label (e.g. "2023-12") and AQI列. Any failures fall back to sample data
+        to keep the demo usable offline.
+        """
+
+        safe_city = city.replace("/", "-")
+        csv_path = self.data_dir / f"{safe_city}.csv"
+        rows: list[dict[str, str | int]] = []
+        try:
+            time.sleep(1)
+            html_text = self._fetch_text(self.MONTH_URL.format(city=quote_plus(city)))
+            soup = BeautifulSoup(html_text, "html.parser")
+            table = soup.find("table")
+            header_cells = [cell.get_text(strip=True) for cell in table.find("tr").find_all(["th", "td"])] if table else []
+            aqi_index = next((i for i, h in enumerate(header_cells) if "AQI" in h.upper()), 1)
+            month_index = 0
+            for row in table.find_all("tr")[1:] if table else []:
+                cells = [cell.get_text(strip=True) for cell in row.find_all("td")]
+                if len(cells) <= max(aqi_index, month_index):
+                    continue
+                month_label = cells[month_index]
+                try:
+                    aqi_value = int(cells[aqi_index])
+                except ValueError:
+                    continue
+                rows.append({"城市": city, "月份": month_label, "AQI": aqi_value})
+            logging.debug("Parsed %d monthly rows for %s", len(rows), city)
+        except requests.RequestException as exc:
+            logging.error("Failed to fetch monthly data for %s: %s", city, exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.error("Unexpected error parsing monthly data for %s: %s", city, exc)
+
+        if not rows:
+            rows = self._sample_monthly(city)
+            logging.info("Using sample monthly data for %s", city)
+
+        df = pd.DataFrame(rows)
+        df.to_csv(csv_path, index=False)
+        logging.debug("Saved monthly data for %s to %s", city, csv_path)
+        return df
+
+    def fetch_monthly_aqi_for_cities(self, cities: List[str]) -> pd.DataFrame:
+        all_rows: list[pd.DataFrame] = []
+        robots_ok, _ = self._respect_robots()
+        if not robots_ok:
+            logging.info("Proceeding with caution; unable to confirm robots.txt before monthly fetch")
+        for city in cities:
+            all_rows.append(self.fetch_city_monthly(city))
+        combined = pd.concat(all_rows, ignore_index=True)
+        logging.debug("Combined monthly DataFrame shape: %s", combined.shape)
+        return combined
+
     def _sample_data(self, limit: int) -> List[CityAQI]:
         sample = [
             CityAQI("北京", 85),
@@ -92,6 +152,23 @@ class AQIModel:
         limited_sample = sample[:limit]
         logging.debug("Returning %d sample cities", len(limited_sample))
         return limited_sample
+
+    def _sample_monthly(self, city: str) -> list[dict[str, str | int]]:
+        month_values = [
+            ("2024-01", 72),
+            ("2024-02", 68),
+            ("2024-03", 75),
+            ("2024-04", 70),
+            ("2024-05", 66),
+            ("2024-06", 64),
+            ("2024-07", 62),
+            ("2024-08", 65),
+            ("2024-09", 69),
+            ("2024-10", 73),
+            ("2024-11", 78),
+            ("2024-12", 80),
+        ]
+        return [{"城市": city, "月份": month, "AQI": value} for month, value in month_values]
 
     def to_dataframe(self, cities: List[CityAQI]) -> pd.DataFrame:
         df = pd.DataFrame([{"城市": c.city, "AQI": c.aqi} for c in cities])
